@@ -1,7 +1,7 @@
 includes("lib/commonlibsf")
 
 set_project("PlayerCameraDuringDialogue")
-set_version("1.18.11")
+set_version("1.18.12")
 set_license("GPL-3.0-or-later")
 set_languages("c++23")
 set_warnings("allextra")
