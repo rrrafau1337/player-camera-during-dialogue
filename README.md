@@ -126,6 +126,8 @@ Current known issues include:
 
 - FIXED in 1.18.12: Ship hailing dialogue can leave the gameplay camera in an incorrect state in some situations (currently under investigation).
 - Rare dialogue voice-line overlap can still occur during automatic camera switching.
+- Character T posing after dialogue ends in certain situation (zero G, awkward angles)
+- Hard crash when speaking to phantoms inside Ma’leen Dam (investigating)
 
 If you encounter a reproducible issue, please include:
 
