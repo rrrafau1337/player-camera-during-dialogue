@@ -126,16 +126,16 @@ Current known issues include:
 
 - FIXED in 1.18.12: Ship hailing dialogue can leave the gameplay camera in an incorrect state in some situations (currently under investigation).
 - Rare dialogue voice-line overlap can still occur during automatic camera switching.
-- Character T posing after dialogue ends in certain situation (zero G, awkward angles)
+- Reports of character T posing after dialogue ends in certain situations (zero G, awkward angles), so far could not reproduce
 - Hard crash when speaking to phantoms inside Ma’leen Dam (investigating)
 
 If you encounter a reproducible issue, please include:
 
 - Plugin version
-- Starfield version
-- SFSE version
 - Steps to reproduce
 - `PointCameraAtPlayer.log`
+- Set Starfield Engine Fixes bDetailedCrashLogger setting to 1 (in Data\SFSE\Plugins\StarfieldEngineFixes.ini): copy paste the whole crashlog
+- Pastebin or create issue or leave comment on Nexusmods
 
 ---
 
