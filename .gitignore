@@ -1,0 +1,61 @@
+# =========================
+# Build output
+# =========================
+build/
+bin/
+obj/
+out/
+.xmake/
+
+# Generated files
+build.gens/
+compile_commands.json
+
+# Visual Studio
+.vs/
+*.VC.db
+*.VC.opendb
+*.suo
+*.user
+*.userosscache
+*.VC.db-shm
+*.VC.db-wal
+
+# CMake (if used)
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+
+# XMake cache
+.cache/
+
+# Logs
+*.log
+
+# Crash dumps
+*.dmp
+*.mdmp
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# Editor
+.vscode/
+.idea/
+
+# Temporary
+*.tmp
+*.bak
+*.old
+
+# SFSE logs
+Data/SFSE/Logs/
+
+# Starfield saves (just in case)
+*.sav
+*.fos
+
+# Release archives
+*.zip
+*.7z
