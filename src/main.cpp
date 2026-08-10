@@ -20,6 +20,7 @@
 #include "RE/T/TESObjectREFR.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -167,6 +168,9 @@ namespace
 	std::uint32_t g_autoPlayerDelayMs = 250;
 	std::uint32_t g_autoNpcDelayMs = 60;
 	std::uint32_t g_autoStartupGraceMs = 350;
+	// Explicit V camera changes remain authoritative briefly even in automatic
+	// mode. Automatic switching resumes after this bounded grace period.
+	constexpr std::uint32_t kManualCameraOverrideGraceMs = 1000;
 	bool g_obstructionHandling = true;
 	std::uint32_t g_obstructionRadiusPercent = 70;
 	bool g_fixFirstPersonBody = true;
@@ -318,6 +322,85 @@ namespace
 	std::atomic_bool g_automaticExpressionTaskQueued = false;
 
 	std::atomic_bool g_dialogueLightingWarningLogged = false;
+
+	struct PerfCounter
+	{
+		std::atomic_uint64_t calls{ 0 };
+		std::atomic_uint64_t totalUs{ 0 };
+		std::atomic_uint64_t maxUs{ 0 };
+	};
+
+	PerfCounter g_perfTick;
+	PerfCounter g_perfDialogueUpdateHook;
+	PerfCounter g_perfControllerHook;
+	PerfCounter g_perfResolverHook;
+	PerfCounter g_perfSetRootAppCulled;
+	PerfCounter g_perfObstructionUpdate;
+	PerfCounter g_perfForceDialogueActorsVisible;
+	PerfCounter g_perfHeadVisibility;
+	PerfCounter g_perfBodyPreparation;
+	PerfCounter g_perfAutomaticCamera;
+
+	std::atomic_uint64_t g_perfVisibilityNoOp{ 0 };
+	std::atomic_uint64_t g_perfVisibilityNativeCalls{ 0 };
+	std::atomic_uint64_t g_perfVisibilityShowCalls{ 0 };
+	std::atomic_uint64_t g_perfVisibilityCullCalls{ 0 };
+	std::atomic_uint64_t g_perfPlayerVisibilityNativeCalls{ 0 };
+	std::atomic_uint64_t g_perfSpeakerVisibilityNativeCalls{ 0 };
+	std::atomic_uint64_t g_perfHeadVisibilityNativeCalls{ 0 };
+
+	std::atomic_uint64_t g_perfObstructionChecks{ 0 };
+	std::atomic_uint64_t g_perfObstructionHits{ 0 };
+	std::atomic_uint64_t g_perfObstructionSpeakerCull{ 0 };
+	std::atomic_uint64_t g_perfObstructionSpeakerRestore{ 0 };
+
+	std::atomic_uint64_t g_perfResolverSuppressed{ 0 };
+	std::atomic_uint64_t g_perfControllerPlayerOverrides{ 0 };
+
+	std::atomic_uintptr_t g_primaryDialogueController{ 0 };
+	std::array<std::atomic_uintptr_t, 16> g_seenDialogueControllers{};
+	std::atomic_uint64_t g_seenDialogueControllerCount{ 0 };
+	std::atomic_uint64_t g_duplicateControllerUpdatesSuppressed{ 0 };
+	std::atomic_uint64_t g_perfPrevDuplicateControllerUpdatesSuppressed{ 0 };
+
+	std::atomic_uint64_t g_perfCameraRebuildCalls{ 0 };
+	std::atomic_uint64_t g_perfCameraRebuildTotalUs{ 0 };
+	std::atomic_uint64_t g_perfCameraRebuildMaxUs{ 0 };
+	std::atomic_uint64_t g_perfViewTransitions{ 0 };
+
+	std::atomic_uint64_t g_perfForceThirdPersonCalls{ 0 };
+	std::atomic_uint64_t g_perfSetDialogueCameraStateCalls{ 0 };
+	std::atomic_uint64_t g_perfExitCleanupUpdates{ 0 };
+	std::atomic_uint64_t g_perfExitPreRenderRepairs{ 0 };
+
+	std::atomic_uint64_t g_perfPlayerRootChanges{ 0 };
+	std::atomic_uint64_t g_perfSpeakerRootChanges{ 0 };
+	std::atomic_uintptr_t g_perfLastPlayerRoot{ 0 };
+	std::atomic_uintptr_t g_perfLastSpeakerRoot{ 0 };
+
+	std::atomic_uint64_t g_perfDialogueIndex{ 0 };
+	std::atomic_uint64_t g_perfLastSnapshotAt{ 0 };
+	std::atomic_uint64_t g_perfPrevTickCalls{ 0 };
+	std::atomic_uint64_t g_perfPrevDialogueHookCalls{ 0 };
+	std::atomic_uint64_t g_perfPrevControllerHookCalls{ 0 };
+	std::atomic_uint64_t g_perfPrevResolverHookCalls{ 0 };
+	std::atomic_uint64_t g_perfPrevVisibilityNativeCalls{ 0 };
+	std::atomic_uint64_t g_perfPrevObstructionChecks{ 0 };
+
+	std::atomic_uint64_t g_viewTransitionRetryAfter{ 0 };
+	std::atomic_bool g_viewTransitionRetryWarningArmed{ false };
+
+	std::atomic_uint64_t g_perfViewTransitionRequests{ 0 };
+	std::atomic_uint64_t g_perfViewTransitionCoalesced{ 0 };
+	std::atomic_uint64_t g_perfViewTransitionBackoffSkipped{ 0 };
+	std::atomic_uint64_t g_perfViewTransitionNoStateAborts{ 0 };
+
+	std::atomic_uint64_t g_perfPrevViewTransitionRequests{ 0 };
+	std::atomic_uint64_t g_perfPrevViewTransitionCoalesced{ 0 };
+	std::atomic_uint64_t g_perfPrevViewTransitionBackoffSkipped{ 0 };
+	std::atomic_uint64_t g_perfPrevViewTransitionNoStateAborts{ 0 };
+
+	constexpr std::uint32_t kViewTransitionRetryBackoffMs = 50;
 
 	[[nodiscard]] const char* DescribeViewReason(
 		const ViewReason reason)
@@ -493,6 +576,7 @@ namespace
 					"iAutoStartupGraceMs",
 					350,
 					kIniPath));
+
 
 		g_obstructionHandling =
 			GetPrivateProfileIntA(
@@ -768,6 +852,7 @@ namespace
 			g_defaultExpressionIndex < kExpressionCount ?
 				kExpressionNames[g_defaultExpressionIndex] :
 				"disabled");
+
 	}
 
 
@@ -855,8 +940,12 @@ namespace
 			WriteBooleanSetting(enableLightingRigSwitch, enabled);
 		const bool movementWritten =
 			WriteBooleanSetting(allowDialogueLightMovement, enabled);
+		// Camera rebuilds can switch dialogue lighting rigs. Leaving stale
+		// non-matching dialogue lights alive allows illumination to accumulate
+		// across repeated player/NPC camera transitions. Always let Starfield
+		// remove a dialogue light once its rig no longer matches.
 		const bool noMatchWritten =
-			WriteBooleanSetting(removeLightWhenNoMatch, !enabled);
+			WriteBooleanSetting(removeLightWhenNoMatch, true);
 
 		if (!lightWritten ||
 			!rigSwitchWritten ||
@@ -873,7 +962,7 @@ namespace
 		}
 
 		REX::INFO(
-			"Cinematic dialogue lighting {}",
+			"Cinematic dialogue lighting {}; stale-light cleanup=on",
 			enabled ? "enabled" : "disabled");
 	}
 
@@ -1405,6 +1494,450 @@ namespace
 			protection == PAGE_EXECUTE_READ ||
 			protection == PAGE_EXECUTE_READWRITE ||
 			protection == PAGE_EXECUTE_WRITECOPY;
+	}
+
+
+	[[nodiscard]] std::uint64_t PerfNowTicks()
+	{
+		LARGE_INTEGER value{};
+		QueryPerformanceCounter(&value);
+		return static_cast<std::uint64_t>(value.QuadPart);
+	}
+
+	[[nodiscard]] std::uint64_t PerfElapsedUs(const std::uint64_t startedAt)
+	{
+		static const std::uint64_t frequency = []() {
+			LARGE_INTEGER value{};
+			QueryPerformanceFrequency(&value);
+			return static_cast<std::uint64_t>(
+				value.QuadPart > 0 ? value.QuadPart : 1);
+		}();
+
+		const auto now = PerfNowTicks();
+		const auto elapsed = now >= startedAt ? now - startedAt : 0;
+		return (elapsed * 1000000ULL) / frequency;
+	}
+
+	void PerfUpdateMax(
+		std::atomic_uint64_t& destination,
+		const std::uint64_t value)
+	{
+		auto current = destination.load(std::memory_order_relaxed);
+		while (value > current &&
+			!destination.compare_exchange_weak(
+				current,
+				value,
+				std::memory_order_relaxed,
+				std::memory_order_relaxed)) {
+		}
+	}
+
+	void PerfRecord(PerfCounter& counter, const std::uint64_t startedAt)
+	{
+		const auto durationUs = PerfElapsedUs(startedAt);
+		counter.calls.fetch_add(1, std::memory_order_relaxed);
+		counter.totalUs.fetch_add(durationUs, std::memory_order_relaxed);
+		PerfUpdateMax(counter.maxUs, durationUs);
+	}
+
+	[[nodiscard]] double PerfAverageUs(const PerfCounter& counter)
+	{
+		const auto calls = counter.calls.load(std::memory_order_relaxed);
+		return calls == 0 ?
+			0.0 :
+			static_cast<double>(
+				counter.totalUs.load(std::memory_order_relaxed)) /
+				static_cast<double>(calls);
+	}
+
+	void PerfResetCounter(PerfCounter& counter)
+	{
+		counter.calls.store(0, std::memory_order_relaxed);
+		counter.totalUs.store(0, std::memory_order_relaxed);
+		counter.maxUs.store(0, std::memory_order_relaxed);
+	}
+
+	void PerfObservePlayerRoot()
+	{
+		auto* root = GetPlayerRoot3D();
+		const auto address = reinterpret_cast<std::uintptr_t>(root);
+		const auto previous =
+			g_perfLastPlayerRoot.exchange(address, std::memory_order_relaxed);
+
+		if (previous != 0 && address != 0 && previous != address) {
+			g_perfPlayerRootChanges.fetch_add(1, std::memory_order_relaxed);
+			REX::INFO(
+				"[PERF] player root changed {} -> {}",
+				reinterpret_cast<void*>(previous),
+				static_cast<void*>(root));
+		}
+	}
+
+	void PerfObserveSpeakerRoot(RE::NiAVObject* root)
+	{
+		const auto address = reinterpret_cast<std::uintptr_t>(root);
+		const auto previous =
+			g_perfLastSpeakerRoot.exchange(address, std::memory_order_relaxed);
+
+		if (previous != 0 && address != 0 && previous != address) {
+			g_perfSpeakerRootChanges.fetch_add(1, std::memory_order_relaxed);
+			REX::INFO(
+				"[PERF] speaker root changed {} -> {}",
+				reinterpret_cast<void*>(previous),
+				static_cast<void*>(root));
+		}
+	}
+
+
+	void ResetDialogueControllerDedupState()
+	{
+		g_primaryDialogueController.store(0, std::memory_order_relaxed);
+		g_seenDialogueControllerCount.store(0, std::memory_order_relaxed);
+		g_duplicateControllerUpdatesSuppressed.store(0, std::memory_order_relaxed);
+		g_perfPrevDuplicateControllerUpdatesSuppressed.store(
+			0,
+			std::memory_order_relaxed);
+
+		for (auto& slot : g_seenDialogueControllers) {
+			slot.store(0, std::memory_order_relaxed);
+		}
+	}
+
+	[[nodiscard]] std::uint64_t RegisterDialogueController(void* controller)
+	{
+		if (!controller) {
+			return g_seenDialogueControllerCount.load(
+				std::memory_order_relaxed);
+		}
+
+		const auto address =
+			reinterpret_cast<std::uintptr_t>(controller);
+
+		for (std::size_t index = 0;
+			index < g_seenDialogueControllers.size();
+			++index) {
+			const auto existing =
+				g_seenDialogueControllers[index].load(
+					std::memory_order_relaxed);
+
+			if (existing == address) {
+				return g_seenDialogueControllerCount.load(
+					std::memory_order_relaxed);
+			}
+
+			if (existing == 0) {
+				std::uintptr_t expected = 0;
+				if (g_seenDialogueControllers[index].compare_exchange_strong(
+						expected,
+						address,
+						std::memory_order_relaxed,
+						std::memory_order_relaxed)) {
+					const auto count =
+						g_seenDialogueControllerCount.fetch_add(
+							1,
+							std::memory_order_relaxed) + 1;
+
+					REX::INFO(
+						"[CTRL] New dialogue controller #{}: pointer={}",
+						count,
+						controller);
+
+					return count;
+				}
+			}
+		}
+
+		return g_seenDialogueControllerCount.load(
+			std::memory_order_relaxed);
+	}
+
+	[[nodiscard]] bool ShouldSuppressDuplicateDialogueController(
+		void* controller)
+	{
+		if (!g_dialogueActiveForHooks.load(std::memory_order_acquire) ||
+			!controller) {
+			return false;
+		}
+
+		(void)RegisterDialogueController(controller);
+
+		const auto address =
+			reinterpret_cast<std::uintptr_t>(controller);
+
+		auto primary =
+			g_primaryDialogueController.load(
+				std::memory_order_acquire);
+
+		if (primary == 0) {
+			std::uintptr_t expected = 0;
+			if (g_primaryDialogueController.compare_exchange_strong(
+					expected,
+					address,
+					std::memory_order_acq_rel,
+					std::memory_order_acquire)) {
+				REX::INFO(
+					"[CTRL] Primary dialogue controller selected: {}",
+					controller);
+				return false;
+			}
+
+			primary = expected;
+		}
+
+		if (primary == address) {
+			return false;
+		}
+
+		g_duplicateControllerUpdatesSuppressed.fetch_add(
+			1,
+			std::memory_order_relaxed);
+
+		return true;
+	}
+
+	void ResetPerformanceDiagnosticsForDialogue()
+	{
+		ResetDialogueControllerDedupState();
+		PerfResetCounter(g_perfTick);
+		PerfResetCounter(g_perfDialogueUpdateHook);
+		PerfResetCounter(g_perfControllerHook);
+		PerfResetCounter(g_perfResolverHook);
+		PerfResetCounter(g_perfSetRootAppCulled);
+		PerfResetCounter(g_perfObstructionUpdate);
+		PerfResetCounter(g_perfForceDialogueActorsVisible);
+		PerfResetCounter(g_perfHeadVisibility);
+		PerfResetCounter(g_perfBodyPreparation);
+		PerfResetCounter(g_perfAutomaticCamera);
+
+		g_perfVisibilityNoOp.store(0, std::memory_order_relaxed);
+		g_perfVisibilityNativeCalls.store(0, std::memory_order_relaxed);
+		g_perfVisibilityShowCalls.store(0, std::memory_order_relaxed);
+		g_perfVisibilityCullCalls.store(0, std::memory_order_relaxed);
+		g_perfPlayerVisibilityNativeCalls.store(0, std::memory_order_relaxed);
+		g_perfSpeakerVisibilityNativeCalls.store(0, std::memory_order_relaxed);
+		g_perfHeadVisibilityNativeCalls.store(0, std::memory_order_relaxed);
+		g_perfObstructionChecks.store(0, std::memory_order_relaxed);
+		g_perfObstructionHits.store(0, std::memory_order_relaxed);
+		g_perfObstructionSpeakerCull.store(0, std::memory_order_relaxed);
+		g_perfObstructionSpeakerRestore.store(0, std::memory_order_relaxed);
+		g_perfResolverSuppressed.store(0, std::memory_order_relaxed);
+		g_perfControllerPlayerOverrides.store(0, std::memory_order_relaxed);
+		g_perfCameraRebuildCalls.store(0, std::memory_order_relaxed);
+		g_perfCameraRebuildTotalUs.store(0, std::memory_order_relaxed);
+		g_perfCameraRebuildMaxUs.store(0, std::memory_order_relaxed);
+		g_perfViewTransitions.store(0, std::memory_order_relaxed);
+		g_perfForceThirdPersonCalls.store(0, std::memory_order_relaxed);
+		g_perfSetDialogueCameraStateCalls.store(0, std::memory_order_relaxed);
+		g_perfExitCleanupUpdates.store(0, std::memory_order_relaxed);
+		g_perfExitPreRenderRepairs.store(0, std::memory_order_relaxed);
+		g_perfPlayerRootChanges.store(0, std::memory_order_relaxed);
+		g_perfSpeakerRootChanges.store(0, std::memory_order_relaxed);
+		g_perfLastPlayerRoot.store(0, std::memory_order_relaxed);
+		g_perfLastSpeakerRoot.store(0, std::memory_order_relaxed);
+		g_perfPrevTickCalls.store(0, std::memory_order_relaxed);
+		g_perfPrevDialogueHookCalls.store(0, std::memory_order_relaxed);
+		g_perfPrevControllerHookCalls.store(0, std::memory_order_relaxed);
+		g_perfPrevResolverHookCalls.store(0, std::memory_order_relaxed);
+		g_perfPrevVisibilityNativeCalls.store(0, std::memory_order_relaxed);
+		g_perfPrevObstructionChecks.store(0, std::memory_order_relaxed);
+
+		g_viewTransitionRetryAfter.store(0, std::memory_order_relaxed);
+		g_viewTransitionRetryWarningArmed.store(false, std::memory_order_relaxed);
+		g_perfViewTransitionRequests.store(0, std::memory_order_relaxed);
+		g_perfViewTransitionCoalesced.store(0, std::memory_order_relaxed);
+		g_perfViewTransitionBackoffSkipped.store(0, std::memory_order_relaxed);
+		g_perfViewTransitionNoStateAborts.store(0, std::memory_order_relaxed);
+		g_perfPrevViewTransitionRequests.store(0, std::memory_order_relaxed);
+		g_perfPrevViewTransitionCoalesced.store(0, std::memory_order_relaxed);
+		g_perfPrevViewTransitionBackoffSkipped.store(0, std::memory_order_relaxed);
+		g_perfPrevViewTransitionNoStateAborts.store(0, std::memory_order_relaxed);
+
+		g_perfLastSnapshotAt.store(GetTickCount64(), std::memory_order_relaxed);
+
+		PerfObservePlayerRoot();
+		PerfObserveSpeakerRoot(GetReferenceRoot3D(GetSpeakerReference()));
+	}
+
+	void LogPerformanceSnapshot(const char* phase)
+	{
+		const auto tickCalls = g_perfTick.calls.load(std::memory_order_relaxed);
+		const auto dialogueCalls =
+			g_perfDialogueUpdateHook.calls.load(std::memory_order_relaxed);
+		const auto controllerCalls =
+			g_perfControllerHook.calls.load(std::memory_order_relaxed);
+		const auto resolverCalls =
+			g_perfResolverHook.calls.load(std::memory_order_relaxed);
+		const auto visibilityNative =
+			g_perfVisibilityNativeCalls.load(std::memory_order_relaxed);
+		const auto obstructionChecks =
+			g_perfObstructionChecks.load(std::memory_order_relaxed);
+
+		const auto tickHz =
+			tickCalls - g_perfPrevTickCalls.exchange(
+				tickCalls, std::memory_order_relaxed);
+		const auto dialogueHz =
+			dialogueCalls - g_perfPrevDialogueHookCalls.exchange(
+				dialogueCalls, std::memory_order_relaxed);
+		const auto controllerHz =
+			controllerCalls - g_perfPrevControllerHookCalls.exchange(
+				controllerCalls, std::memory_order_relaxed);
+		const auto resolverHz =
+			resolverCalls - g_perfPrevResolverHookCalls.exchange(
+				resolverCalls, std::memory_order_relaxed);
+		const auto visibilityPerSecond =
+			visibilityNative - g_perfPrevVisibilityNativeCalls.exchange(
+				visibilityNative, std::memory_order_relaxed);
+		const auto obstructionPerSecond =
+			obstructionChecks - g_perfPrevObstructionChecks.exchange(
+				obstructionChecks, std::memory_order_relaxed);
+
+		const auto duplicateSuppressed =
+			g_duplicateControllerUpdatesSuppressed.load(
+				std::memory_order_relaxed);
+		const auto duplicateSuppressedPerSecond =
+			duplicateSuppressed -
+				g_perfPrevDuplicateControllerUpdatesSuppressed.exchange(
+					duplicateSuppressed,
+					std::memory_order_relaxed);
+
+		const auto transitionRequests =
+			g_perfViewTransitionRequests.load(std::memory_order_relaxed);
+		const auto transitionCoalesced =
+			g_perfViewTransitionCoalesced.load(std::memory_order_relaxed);
+		const auto transitionBackoffSkipped =
+			g_perfViewTransitionBackoffSkipped.load(std::memory_order_relaxed);
+		const auto transitionNoStateAborts =
+			g_perfViewTransitionNoStateAborts.load(std::memory_order_relaxed);
+
+		const auto transitionRequestsPerSecond =
+			transitionRequests -
+				g_perfPrevViewTransitionRequests.exchange(
+					transitionRequests,
+					std::memory_order_relaxed);
+		const auto transitionCoalescedPerSecond =
+			transitionCoalesced -
+				g_perfPrevViewTransitionCoalesced.exchange(
+					transitionCoalesced,
+					std::memory_order_relaxed);
+		const auto transitionBackoffSkippedPerSecond =
+			transitionBackoffSkipped -
+				g_perfPrevViewTransitionBackoffSkipped.exchange(
+					transitionBackoffSkipped,
+					std::memory_order_relaxed);
+		const auto transitionNoStateAbortsPerSecond =
+			transitionNoStateAborts -
+				g_perfPrevViewTransitionNoStateAborts.exchange(
+					transitionNoStateAborts,
+					std::memory_order_relaxed);
+
+		const auto rebuildCalls =
+			g_perfCameraRebuildCalls.load(std::memory_order_relaxed);
+		const double rebuildAverageUs =
+			rebuildCalls == 0 ?
+				0.0 :
+				static_cast<double>(
+					g_perfCameraRebuildTotalUs.load(std::memory_order_relaxed)) /
+					static_cast<double>(rebuildCalls);
+
+		auto* playerRoot = GetPlayerRoot3D();
+		auto* speakerRoot = GetReferenceRoot3D(GetSpeakerReference());
+		PerfObservePlayerRoot();
+		PerfObserveSpeakerRoot(speakerRoot);
+
+		REX::INFO(
+			"[PERF] {} dlg#{} view={} tickHz={} dialogueHz={} controllerHz={} "
+			"resolverHz={} nativeVisibility/s={} obstructionChecks/s={} "
+			"controllers={} duplicateSuppressed/s={} duplicateSuppressed={} "
+			"transitionReq/s={} coalesced/s={} backoffSkip/s={} noStateAbort/s={} | "
+			"tick avg={:.1f}us max={} dialogue avg={:.1f}us max={} "
+			"controller avg={:.1f}us max={} resolver avg={:.1f}us max={} | "
+			"visibility avg={:.1f}us max={} native={} noop={} show={} cull={} "
+			"[player={},speaker={},head={}] | "
+			"obstruction checks={} hits={} culls={} restores={} avg={:.1f}us max={} | "
+			"rebuilds={} avg={:.1f}us max={} transitions={} "
+			"resolverSuppressed={} controllerPlayerOverrides={} | "
+			"bodyPrep avg={:.1f}us max={} force3P={} setDialogueState={} | "
+			"forceVisible calls={} avg={:.1f}us max={} exitUpdates={} "
+			"preRenderRepairs={} | playerRoot={} changes={} speakerRoot={} changes={}",
+			phase ? phase : "snapshot",
+			g_perfDialogueIndex.load(std::memory_order_relaxed),
+			g_playerViewRequested.load(std::memory_order_relaxed) ? "player" : "npc",
+			tickHz,
+			dialogueHz,
+			controllerHz,
+			resolverHz,
+			visibilityPerSecond,
+			obstructionPerSecond,
+			g_seenDialogueControllerCount.load(std::memory_order_relaxed),
+			duplicateSuppressedPerSecond,
+			duplicateSuppressed,
+			transitionRequestsPerSecond,
+			transitionCoalescedPerSecond,
+			transitionBackoffSkippedPerSecond,
+			transitionNoStateAbortsPerSecond,
+			PerfAverageUs(g_perfTick),
+			g_perfTick.maxUs.load(std::memory_order_relaxed),
+			PerfAverageUs(g_perfDialogueUpdateHook),
+			g_perfDialogueUpdateHook.maxUs.load(std::memory_order_relaxed),
+			PerfAverageUs(g_perfControllerHook),
+			g_perfControllerHook.maxUs.load(std::memory_order_relaxed),
+			PerfAverageUs(g_perfResolverHook),
+			g_perfResolverHook.maxUs.load(std::memory_order_relaxed),
+			PerfAverageUs(g_perfSetRootAppCulled),
+			g_perfSetRootAppCulled.maxUs.load(std::memory_order_relaxed),
+			visibilityNative,
+			g_perfVisibilityNoOp.load(std::memory_order_relaxed),
+			g_perfVisibilityShowCalls.load(std::memory_order_relaxed),
+			g_perfVisibilityCullCalls.load(std::memory_order_relaxed),
+			g_perfPlayerVisibilityNativeCalls.load(std::memory_order_relaxed),
+			g_perfSpeakerVisibilityNativeCalls.load(std::memory_order_relaxed),
+			g_perfHeadVisibilityNativeCalls.load(std::memory_order_relaxed),
+			obstructionChecks,
+			g_perfObstructionHits.load(std::memory_order_relaxed),
+			g_perfObstructionSpeakerCull.load(std::memory_order_relaxed),
+			g_perfObstructionSpeakerRestore.load(std::memory_order_relaxed),
+			PerfAverageUs(g_perfObstructionUpdate),
+			g_perfObstructionUpdate.maxUs.load(std::memory_order_relaxed),
+			rebuildCalls,
+			rebuildAverageUs,
+			g_perfCameraRebuildMaxUs.load(std::memory_order_relaxed),
+			g_perfViewTransitions.load(std::memory_order_relaxed),
+			g_perfResolverSuppressed.load(std::memory_order_relaxed),
+			g_perfControllerPlayerOverrides.load(std::memory_order_relaxed),
+			PerfAverageUs(g_perfBodyPreparation),
+			g_perfBodyPreparation.maxUs.load(std::memory_order_relaxed),
+			g_perfForceThirdPersonCalls.load(std::memory_order_relaxed),
+			g_perfSetDialogueCameraStateCalls.load(std::memory_order_relaxed),
+			g_perfForceDialogueActorsVisible.calls.load(std::memory_order_relaxed),
+			PerfAverageUs(g_perfForceDialogueActorsVisible),
+			g_perfForceDialogueActorsVisible.maxUs.load(std::memory_order_relaxed),
+			g_perfExitCleanupUpdates.load(std::memory_order_relaxed),
+			g_perfExitPreRenderRepairs.load(std::memory_order_relaxed),
+			static_cast<void*>(playerRoot),
+			g_perfPlayerRootChanges.load(std::memory_order_relaxed),
+			static_cast<void*>(speakerRoot),
+			g_perfSpeakerRootChanges.load(std::memory_order_relaxed));
+	}
+
+	void UpdatePerformanceSnapshot()
+	{
+		if (!g_dialogueOpen ||
+			g_shipDialogueBypass.load(std::memory_order_relaxed)) {
+			return;
+		}
+
+		const auto now = GetTickCount64();
+		auto previous = g_perfLastSnapshotAt.load(std::memory_order_relaxed);
+		if (now - previous < 1000) {
+			return;
+		}
+
+		if (!g_perfLastSnapshotAt.compare_exchange_strong(
+				previous, now, std::memory_order_relaxed)) {
+			return;
+		}
+
+		LogPerformanceSnapshot("1s");
 	}
 
 
@@ -2205,6 +2738,12 @@ namespace
 		const char* subject,
 		const char* phase)
 	{
+		const auto perfStartedAt = PerfNowTicks();
+		struct PerfScope
+		{
+			std::uint64_t startedAt;
+			~PerfScope() { PerfRecord(g_perfSetRootAppCulled, startedAt); }
+		} perfScope{ perfStartedAt };
 		if (!root ||
 			!IsReadableAddress(root, sizeof(void*))) {
 			if (!g_visibilityCallFailed.exchange(
@@ -2225,6 +2764,7 @@ namespace
 		// Most visibility requests are no-ops. Return before walking the
 		// vtable or calling VirtualQuery on its target function.
 		if (alreadyCulled == culled) {
+			g_perfVisibilityNoOp.fetch_add(1, std::memory_order_relaxed);
 			return true;
 		}
 
@@ -2263,6 +2803,21 @@ namespace
 			reinterpret_cast<SetAppCulled_t>(rawFunction);
 
 		setAppCulled(root, culled);
+
+		g_perfVisibilityNativeCalls.fetch_add(1, std::memory_order_relaxed);
+		if (culled) {
+			g_perfVisibilityCullCalls.fetch_add(1, std::memory_order_relaxed);
+		} else {
+			g_perfVisibilityShowCalls.fetch_add(1, std::memory_order_relaxed);
+		}
+		const std::string_view perfSubject{ subject ? subject : "" };
+		if (perfSubject == "player") {
+			g_perfPlayerVisibilityNativeCalls.fetch_add(1, std::memory_order_relaxed);
+		} else if (perfSubject == "speaker") {
+			g_perfSpeakerVisibilityNativeCalls.fetch_add(1, std::memory_order_relaxed);
+		} else if (perfSubject.find("head") != std::string_view::npos) {
+			g_perfHeadVisibilityNativeCalls.fetch_add(1, std::memory_order_relaxed);
+		}
 
 		const auto afterFlags = ReadPlayerRootFlags(root);
 
@@ -2304,6 +2859,12 @@ namespace
 
 	void EnsurePlayerHeadVisible(const char* phase)
 	{
+		const auto perfStartedAt = PerfNowTicks();
+		struct PerfScope
+		{
+			std::uint64_t startedAt;
+			~PerfScope() { PerfRecord(g_perfHeadVisibility, startedAt); }
+		} perfScope{ perfStartedAt };
 		if (!g_fixPlayerHeadVisibility ||
 			!g_playerViewRequested.load(std::memory_order_acquire)) {
 			return;
@@ -2380,6 +2941,8 @@ namespace
 			return;
 		}
 
+		g_perfObstructionSpeakerRestore.fetch_add(1, std::memory_order_relaxed);
+
 		(void)SetRootAppCulled(
 			root,
 			false,
@@ -2391,6 +2954,12 @@ namespace
 		const char* phase,
 		const bool includePlayer = true)
 	{
+		const auto perfStartedAt = PerfNowTicks();
+		struct PerfScope
+		{
+			std::uint64_t startedAt;
+			~PerfScope() { PerfRecord(g_perfForceDialogueActorsVisible, startedAt); }
+		} perfScope{ perfStartedAt };
 		if (includePlayer) {
 			(void)SetPlayerRootAppCulled(false, phase);
 		}
@@ -2505,6 +3074,7 @@ namespace
 
 	void UpdateExitVisibilityCleanup()
 	{
+		g_perfExitCleanupUpdates.fetch_add(1, std::memory_order_relaxed);
 		const auto cleanupUntil =
 			g_exitVisibilityCleanupUntil.load(
 				std::memory_order_acquire);
@@ -2648,6 +3218,12 @@ namespace
 
 	void UpdateSpeakerObstruction(const bool force = false)
 	{
+		const auto perfStartedAt = PerfNowTicks();
+		struct PerfScope
+		{
+			std::uint64_t startedAt;
+			~PerfScope() { PerfRecord(g_perfObstructionUpdate, startedAt); }
+		} perfScope{ perfStartedAt };
 		const auto now = GetTickCount64();
 		const auto next = g_nextObstructionCheckAt.load(
 			std::memory_order_acquire);
@@ -2657,6 +3233,7 @@ namespace
 		g_nextObstructionCheckAt.store(
 			now + g_obstructionCheckIntervalMs,
 			std::memory_order_release);
+		g_perfObstructionChecks.fetch_add(1, std::memory_order_relaxed);
 
 		auto* speakerRoot =
 			RememberDialogueSpeakerRoot();
@@ -2678,6 +3255,10 @@ namespace
 				std::memory_order_acquire) &&
 			SpeakerIntersectsPlayerShot(speakerRoot);
 
+		if (shouldCull) {
+			g_perfObstructionHits.fetch_add(1, std::memory_order_relaxed);
+		}
+
 		if (shouldCull && !culledRoot) {
 			if (SetRootAppCulled(
 					speakerRoot,
@@ -2687,6 +3268,7 @@ namespace
 				g_culledSpeakerRoot.store(
 					reinterpret_cast<std::uintptr_t>(speakerRoot),
 					std::memory_order_release);
+				g_perfObstructionSpeakerCull.fetch_add(1, std::memory_order_relaxed);
 			}
 		} else if (!shouldCull && culledRoot) {
 			RestoreSpeakerObstruction("obstruction-cleared");
@@ -2759,6 +3341,7 @@ namespace
 		// external skeleton. That left the first-person body transforms intact.
 		// Stage the transition and resume the player shot after several frames.
 		ResetSpeakerHeadAnchorLock();
+		g_perfForceThirdPersonCalls.fetch_add(1, std::memory_order_relaxed);
 		camera->ForceThirdPerson();
 
 		const auto now = GetTickCount64();
@@ -2798,7 +3381,8 @@ namespace
 
 		ResetSpeakerHeadAnchorLock();
 		if (!camera->IsInThirdPerson()) {
-			camera->ForceThirdPerson();
+			g_perfForceThirdPersonCalls.fetch_add(1, std::memory_order_relaxed);
+		camera->ForceThirdPerson();
 		}
 
 		const auto now = GetTickCount64();
@@ -2843,6 +3427,12 @@ namespace
 
 	void UpdatePendingBodyPreparation()
 	{
+		const auto perfStartedAt = PerfNowTicks();
+		struct PerfScope
+		{
+			std::uint64_t startedAt;
+			~PerfScope() { PerfRecord(g_perfBodyPreparation, startedAt); }
+		} perfScope{ perfStartedAt };
 		if (!g_bodyPreparationPending) {
 			return;
 		}
@@ -2878,7 +3468,9 @@ namespace
 			const bool dialogueStateAlreadyActive =
 				camera->QCameraEquals(RE::CameraState::kDialogue);
 			if (!dialogueStateAlreadyActive) {
-				camera->SetCameraState(RE::CameraState::kDialogue);
+				g_perfSetDialogueCameraStateCalls.fetch_add(1, std::memory_order_relaxed);
+				g_perfSetDialogueCameraStateCalls.fetch_add(1, std::memory_order_relaxed);
+		camera->SetCameraState(RE::CameraState::kDialogue);
 			}
 			if (!camera->QCameraEquals(RE::CameraState::kDialogue)) {
 				if (now < g_bodyPreparationDeadlineAt) {
@@ -2939,7 +3531,12 @@ namespace
 				if (rebuildRequired) {
 					const auto rebuild = GetRebuildFunction();
 					if (rebuild) {
+						const auto perfRebuildStartedAt = PerfNowTicks();
 						rebuild(dialogueState, true);
+						const auto perfRebuildUs = PerfElapsedUs(perfRebuildStartedAt);
+						g_perfCameraRebuildCalls.fetch_add(1, std::memory_order_relaxed);
+						g_perfCameraRebuildTotalUs.fetch_add(perfRebuildUs, std::memory_order_relaxed);
+						PerfUpdateMax(g_perfCameraRebuildMaxUs, perfRebuildUs);
 					}
 				} else {
 					REX::INFO(
@@ -2963,7 +3560,8 @@ namespace
 
 		if (!camera->IsInThirdPerson() &&
 			now < g_bodyPreparationDeadlineAt) {
-			camera->ForceThirdPerson();
+			g_perfForceThirdPersonCalls.fetch_add(1, std::memory_order_relaxed);
+		camera->ForceThirdPerson();
 			g_bodyPreparationResumeAt = now + 16;
 			return;
 		}
@@ -3027,6 +3625,7 @@ namespace
 			}
 		}
 
+		g_perfSetDialogueCameraStateCalls.fetch_add(1, std::memory_order_relaxed);
 		camera->SetCameraState(RE::CameraState::kDialogue);
 		if (!camera->QCameraEquals(RE::CameraState::kDialogue)) {
 			if (now < g_bodyPreparationDeadlineAt) {
@@ -3078,7 +3677,12 @@ namespace
 
 				const auto rebuild = GetRebuildFunction();
 				if (rebuild) {
+					const auto perfRebuildStartedAt = PerfNowTicks();
 					rebuild(dialogueState, true);
+					const auto perfRebuildUs = PerfElapsedUs(perfRebuildStartedAt);
+					g_perfCameraRebuildCalls.fetch_add(1, std::memory_order_relaxed);
+					g_perfCameraRebuildTotalUs.fetch_add(perfRebuildUs, std::memory_order_relaxed);
+					PerfUpdateMax(g_perfCameraRebuildMaxUs, perfRebuildUs);
 				}
 			}
 
@@ -3134,7 +3738,8 @@ namespace
 			}
 		} else {
 			if (!IsThirdPersonGameplayCamera(camera)) {
-				camera->ForceThirdPerson();
+				g_perfForceThirdPersonCalls.fetch_add(1, std::memory_order_relaxed);
+		camera->ForceThirdPerson();
 				g_firstPersonRestoreAt = now + 32;
 
 				if (now < g_gameplayCameraRestoreDeadlineAt) {
@@ -3261,6 +3866,14 @@ namespace
 
 	[[nodiscard]] void* GetCapturedController()
 	{
+		const auto primary =
+			g_primaryDialogueController.load(
+				std::memory_order_acquire);
+
+		if (primary != 0) {
+			return reinterpret_cast<void*>(primary);
+		}
+
 		return reinterpret_cast<void*>(
 			g_capturedController.load(
 				std::memory_order_acquire));
@@ -3509,7 +4122,7 @@ namespace
 				g_stabilizedSpeakerHeadUpdateCount.fetch_add(
 					1,
 					std::memory_order_acq_rel) + 1;
-			if (count <= 12) {
+			if (false && count <= 4) {
 				REX::INFO(
 					"NPC dialogue head anchor stabilized {} {}: "
 					"animated translate delta=({:.3f},{:.3f},{:.3f})",
@@ -3554,6 +4167,13 @@ namespace
 	public:
 		static void Thunk(void* dialogueState)
 		{
+			const auto perfStartedAt = PerfNowTicks();
+			struct PerfScope
+			{
+				std::uint64_t startedAt;
+				~PerfScope() { PerfRecord(g_perfDialogueUpdateHook, startedAt); }
+			} perfScope{{ perfStartedAt }};
+
 			if (g_shipDialogueBypass.load(std::memory_order_acquire)) {
 				Hook(dialogueState);
 				return;
@@ -3612,6 +4232,7 @@ namespace
 						"dialogue-close-pre-render");
 					ForceDialogueActorsVisible(
 						"dialogue-close-pre-render");
+					g_perfExitPreRenderRepairs.fetch_add(1, std::memory_order_relaxed);
 					REX::INFO(
 						"Dialogue exit pre-render visibility repaired");
 				}
@@ -3656,8 +4277,21 @@ namespace
 			void* controller,
 			std::uint32_t targetHandle)
 		{
+			const auto perfStartedAt = PerfNowTicks();
+			struct PerfScope
+			{
+				std::uint64_t startedAt;
+				~PerfScope() { PerfRecord(g_perfControllerHook, startedAt); }
+			} perfScope{{ perfStartedAt }};
+
 			if (g_shipDialogueBypass.load(std::memory_order_acquire)) {
 				Hook(controller, targetHandle);
+				return;
+			}
+
+			if (ShouldSuppressDuplicateDialogueController(controller)) {
+				// Do not overwrite g_capturedController with a duplicate and do
+				// not forward its expensive native controller update.
 				return;
 			}
 
@@ -3686,6 +4320,7 @@ namespace
 			std::uint32_t effectiveTarget = targetHandle;
 			if (playerMode && playerHandle != 0) {
 				effectiveTarget = playerHandle;
+				g_perfControllerPlayerOverrides.fetch_add(1, std::memory_order_relaxed);
 			}
 
 			const auto beforeTarget =
@@ -3748,6 +4383,13 @@ namespace
 	public:
 		static void Thunk(void* dialogueState, void* dialogueContext)
 		{
+			const auto perfStartedAt = PerfNowTicks();
+			struct PerfScope
+			{
+				std::uint64_t startedAt;
+				~PerfScope() { PerfRecord(g_perfResolverHook, startedAt); }
+			} perfScope{{ perfStartedAt }};
+
 			if (g_shipDialogueBypass.load(std::memory_order_acquire)) {
 				Hook(dialogueState, dialogueContext);
 				return;
@@ -3781,6 +4423,7 @@ namespace
 					true,
 					std::memory_order_release);
 
+				g_perfResolverSuppressed.fetch_add(1, std::memory_order_relaxed);
 				const auto count =
 					g_suppressedTargetResolveCount.fetch_add(
 						1,
@@ -3847,10 +4490,31 @@ namespace
 
 		void* const dialogueState = GetActiveDialogueState();
 		if (!dialogueState) {
-			REX::WARN(
-				"Toggle aborted: no active DialogueCameraState");
+			g_perfViewTransitionNoStateAborts.fetch_add(
+				1,
+				std::memory_order_relaxed);
+
+			g_viewTransitionRetryAfter.store(
+				GetTickCount64() + kViewTransitionRetryBackoffMs,
+				std::memory_order_release);
+
+			if (!g_viewTransitionRetryWarningArmed.exchange(
+					true,
+					std::memory_order_acq_rel)) {
+				REX::WARN(
+					"Dialogue camera state temporarily unavailable; retrying");
+			}
+
 			return;
 		}
+
+		// A live DialogueCameraState means the retry episode is over.
+		g_viewTransitionRetryAfter.store(
+			0,
+			std::memory_order_release);
+		g_viewTransitionRetryWarningArmed.store(
+			false,
+			std::memory_order_release);
 
 		const bool currentPlayerView =
 			g_playerViewRequested.load(
@@ -3859,6 +4523,8 @@ namespace
 		if (currentPlayerView == showPlayer) {
 			return;
 		}
+
+		g_perfViewTransitions.fetch_add(1, std::memory_order_relaxed);
 
 		const auto targetHandle =
 			showPlayer ?
@@ -4000,10 +4666,15 @@ namespace
 		}
 
 		const auto transitionStartedAt = GetTickCount64();
+		const auto rebuildPerfStartedAt = PerfNowTicks();
 		{
 			ScopedPlayerFramingOverride framingOverride{ "camera-rebuild" };
 			rebuild(dialogueState, true);
 		}
+		const auto rebuildDurationUs = PerfElapsedUs(rebuildPerfStartedAt);
+		g_perfCameraRebuildCalls.fetch_add(1, std::memory_order_relaxed);
+		g_perfCameraRebuildTotalUs.fetch_add(rebuildDurationUs, std::memory_order_relaxed);
+		PerfUpdateMax(g_perfCameraRebuildMaxUs, rebuildDurationUs);
 		const auto rebuildDurationMs =
 			GetTickCount64() - transitionStartedAt;
 
@@ -4048,8 +4719,24 @@ namespace
 		const bool showPlayer,
 		const ViewReason reason)
 	{
+		g_perfViewTransitionRequests.fetch_add(
+			1,
+			std::memory_order_relaxed);
+
 		if (!g_taskInterface) {
 			REX::CRITICAL("SFSE TaskInterface is unavailable");
+			return;
+		}
+
+		const auto now = GetTickCount64();
+		const auto retryAfter =
+			g_viewTransitionRetryAfter.load(
+				std::memory_order_acquire);
+
+		if (retryAfter != 0 && now < retryAfter) {
+			g_perfViewTransitionBackoffSkipped.fetch_add(
+				1,
+				std::memory_order_relaxed);
 			return;
 		}
 
@@ -4058,8 +4745,9 @@ namespace
 				expected,
 				true,
 				std::memory_order_acq_rel)) {
-			REX::WARN(
-				"A dialogue-camera toggle is already queued");
+			g_perfViewTransitionCoalesced.fetch_add(
+				1,
+				std::memory_order_relaxed);
 			return;
 		}
 
@@ -4081,13 +4769,30 @@ namespace
 			!g_playerViewRequested.load(
 				std::memory_order_acquire);
 
-		QueueView(
-			showPlayer,
-			ViewReason::kManual);
+		const auto now = GetTickCount64();
+		g_autoIgnoreUntil = std::max(
+			g_autoIgnoreUntil,
+			now + kManualCameraOverrideGraceMs);
+		g_autoCandidateInitialized = false;
+		g_autoCandidateSince = 0;
+
+		REX::INFO(
+			"Manual V camera override: requestedView={}, mode={}, autoResumeIn={}ms",
+			showPlayer ? "player" : "NPC",
+			g_switchMode == SwitchMode::kAutomatic ? "automatic" : "manual",
+			kManualCameraOverrideGraceMs);
+
+		QueueView(showPlayer, ViewReason::kManual);
 	}
 
 	void UpdateAutomaticCamera()
 	{
+		const auto perfStartedAt = PerfNowTicks();
+		struct PerfScope
+		{
+			std::uint64_t startedAt;
+			~PerfScope() { PerfRecord(g_perfAutomaticCamera, startedAt); }
+		} perfScope{ perfStartedAt };
 		if (g_switchMode != SwitchMode::kAutomatic ||
 			!g_dialogueOpen ||
 			g_bodyPreparationPending ||
@@ -4154,6 +4859,13 @@ namespace
 
 	void Tick()
 	{
+		const auto perfStartedAt = PerfNowTicks();
+		struct PerfScope
+		{
+			std::uint64_t startedAt;
+			~PerfScope() { PerfRecord(g_perfTick, startedAt); }
+		} perfScope{ perfStartedAt };
+
 		TickGuard guard;
 		if (!guard) {
 			return;
@@ -4308,6 +5020,9 @@ namespace
 					0,
 					std::memory_order_release);
 
+				g_perfDialogueIndex.fetch_add(1, std::memory_order_relaxed);
+				ResetPerformanceDiagnosticsForDialogue();
+
 				REX::INFO(
 					"DialogueMenu opened; speaker=0x{:08X}, player=0x{:08X}, "
 					"restoreFirstPerson={}",
@@ -4386,6 +5101,10 @@ namespace
 					std::memory_order_release);
 
 
+				ResetDialogueControllerDedupState();
+				g_viewTransitionRetryAfter.store(0, std::memory_order_relaxed);
+				g_viewTransitionRetryWarningArmed.store(false, std::memory_order_relaxed);
+
 				REX::INFO(
 					"DialogueMenu closed; early target override disabled");
 				}
@@ -4417,10 +5136,11 @@ namespace
 		const bool vIsDown =
 			(GetAsyncKeyState(g_manualSwitchKey) & 0x8000) != 0;
 
-		if (g_switchMode == SwitchMode::kManual &&
-			vIsDown &&
+		if (vIsDown &&
 			!g_vWasDown) {
-			REX::INFO("Manual camera switch key pressed");
+			REX::INFO(
+				"Camera switch key pressed; mode={}",
+				g_switchMode == SwitchMode::kAutomatic ? "automatic" : "manual");
 			QueueManualToggle();
 		}
 
@@ -4473,7 +5193,7 @@ SFSE_PLUGIN_LOAD(const SFSE::LoadInterface* a_sfse)
 	}
 
 	REX::INFO(
-		"PointCameraAtPlayer 1.18.22 real-baseline ship-piloting bypass build loaded");
+		"PointCameraAtPlayer 1.18.28 cinematic-light cleanup test loaded");
 	REX::WARN(
 		"Experimental build for Starfield 1.16.244.0 only");
 
@@ -4486,9 +5206,9 @@ SFSE_PLUGIN_LOAD(const SFSE::LoadInterface* a_sfse)
 	g_taskInterface->AddPermanentTask(Tick);
 
 	REX::INFO(
-		"Original baseline camera/dialogue implementation preserved; "
-		"only dialogues opened from recent SpaceshipHudMenu piloting state "
-		"are fully bypassed until DialogueMenu closes.");
+		"1.18.28 keeps the 1.18.27 release-candidate fixes and changes cinematic "
+		"dialogue lighting cleanup so stale/non-matching dialogue lights may be removed "
+		"during repeated camera-rig rebuilds. No new INI option is required.");
 
 	return true;
 }
