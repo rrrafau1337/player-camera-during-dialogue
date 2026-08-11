@@ -123,11 +123,8 @@ build/windows/x64/release/PointCameraAtPlayer.dll
 The plugin is still actively being developed.
 
 Current known issues include:
-
-- FIXED in 1.18.12: Ship hailing dialogue can leave the gameplay camera in an incorrect state in some situations (currently under investigation).
 - Rare dialogue voice-line overlap can still occur during automatic camera switching.
-- Reports of character T posing after dialogue ends in certain situations (zero G, awkward angles), so far could not reproduce
-- Hard crash when speaking to phantoms inside Ma’leen Dam (investigating)
+- Reports of character T posing after dialogue ends in certain situations (zero G, awkward angles), so far could not reproduce, but most quirks can be fixed by toggling the mod off (press F10) and zooming in and out to first / third person
 
 If you encounter a reproducible issue, please include:
 
