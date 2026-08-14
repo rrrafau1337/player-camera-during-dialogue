@@ -1,7 +1,7 @@
 includes("lib/commonlibsf")
 
 set_project("PlayerCameraDuringDialogue")
-set_version("1.18.13")
+set_version("1.18.40")
 set_license("GPL-3.0-or-later")
 set_languages("c++23")
 set_warnings("allextra")
@@ -15,7 +15,7 @@ target("PlayerCameraDuringDialogue")
     add_rules("commonlibsf.plugin", {
         name = "PointCameraAtPlayer",
         author = "rrrafau",
-        description = "A native SFSE plugin that adds cinematic player-focused dialogue cameras to Starfield.",
+        description = "See your face when it's time to talk",
         email = ""
     })
 
